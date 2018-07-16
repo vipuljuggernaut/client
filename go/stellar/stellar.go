@@ -297,7 +297,7 @@ func LookupRecipient(m libkb.MetaContext, to stellarcommon.RecipientInput) (res 
 		return res, err
 	}
 	res.User = user
-	accountID := user.StellarWalletAddress()
+	accountID := user.StellarAccountID()
 	if accountID == nil {
 		return res, nil
 	}
@@ -1164,18 +1164,23 @@ func LookupUserByAccountID(m libkb.MetaContext, accountID stellar1.AccountID) (u
 		}
 		genericErr := errors.New("error checking account lookup")
 		if !upak.Current.EldestSeqno.Eq(uv.EldestSeqno) {
-			m.CDebugf("user %v's eldest seqno did not match %v != %v", upak.Current.Username, uv.EldestSeqno, uv.Uid)
+			m.CDebugf("user %v's eldest seqno did not match %v != %v", upak.Current.Username, upak.Current.EldestSeqno, uv.EldestSeqno)
 			return true, genericErr
 		}
 		if upak.Current.StellarAccountID == nil {
 			m.CDebugf("user %v has no stellar account", upak.Current.Username)
 			return true, genericErr
 		}
-		if !upak.Current.StellarAccountID.Eq(accountID) {
-			m.CDebugf("user %v has different account %v != %v", upak.Current.Username, upak.Current.StellarAccountID, accountID)
+		unverifiedAccountID, err := libkb.ParseStellarAccountID(*upak.Current.StellarAccountID)
+		if err != nil {
+			m.CDebugf("user has invalid account ID '%v': %v", *upak.Current.StellarAccountID, err)
+			return false, genericErr
+		}
+		if !unverifiedAccountID.Eq(accountID) {
+			m.CDebugf("user %v has different account %v != %v", upak.Current.Username, unverifiedAccountID, accountID)
 			return true, genericErr
 		}
-		return nil
+		return false, nil
 	}
 	retry, err := verify(false)
 	if err == nil {

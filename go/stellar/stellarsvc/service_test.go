@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/keybase/client/go/engine"
 	"github.com/keybase/client/go/externalstest"
 	"github.com/keybase/client/go/kbtest"
@@ -45,6 +46,12 @@ func TestCreateWallet(t *testing.T) {
 	tcs, cleanup := setupTestsWithSettings(t, []usetting{usettingWalletless, usettingFull})
 	defer cleanup()
 
+	t.Logf("Lookup for a bogus address")
+	uv, err := stellar.LookupUserByAccountID(tcs[0].MetaContext(), "GCCJJFCRCQAWDWRAZ3R6235KCQ4PQYE5KEWHGE5ICVTZLTMRKVWAWP7N")
+	require.Error(t, err)
+	require.IsType(t, libkb.NotFoundError{}, err)
+
+	t.Logf("Create an initial wallet")
 	created, err := stellar.CreateWallet(context.Background(), tcs[0].G)
 	require.NoError(t, err)
 	require.True(t, created)
@@ -66,15 +73,43 @@ func TestCreateWallet(t *testing.T) {
 	require.Len(t, bundle.Accounts[0].Signers, 1)
 	require.Equal(t, "", bundle.Accounts[0].Name)
 
-	t.Logf("Lookup the public stellar address as another user")
+	t.Logf("Lookup the user by public address as another user")
+	a1 := bundle.Accounts[0].AccountID
+	uv, err = stellar.LookupUserByAccountID(tcs[1].MetaContext(), a1)
+	require.NoError(t, err)
+	require.Equal(t, tcs[0].Fu.GetUserVersion(), uv)
+	t.Logf("and as self")
+	uv, err = stellar.LookupUserByAccountID(tcs[0].MetaContext(), a1)
+	require.NoError(t, err)
+	require.Equal(t, tcs[0].Fu.GetUserVersion(), uv)
+
+	t.Logf("Lookup the address by user as another user")
 	u0, err := tcs[1].G.LoadUserByUID(tcs[0].G.ActiveDevice.UID())
 	require.NoError(t, err)
-	addr := u0.StellarWalletAddress()
+	addr := u0.StellarAccountID()
 	t.Logf("Found account: %v", addr)
 	require.NotNil(t, addr)
 	_, err = libkb.MakeNaclSigningKeyPairFromStellarAccountID(*addr)
 	require.NoError(t, err, "stellar key should be nacl pubable")
 	require.Equal(t, bundle.Accounts[0].AccountID.String(), addr.String(), "addr looked up should match secret bundle")
+
+	t.Logf("Change primary accounts")
+	a2, s2 := randomStellarKeypair()
+	err = tcs[0].Srv.ImportSecretKeyLocal(context.Background(), stellar1.ImportSecretKeyLocalArg{
+		SecretKey:   s2,
+		MakePrimary: true,
+	})
+	require.NoError(t, err)
+
+	t.Logf("Lookup by the new primary")
+	uv, err = stellar.LookupUserByAccountID(tcs[1].MetaContext(), a2)
+	require.NoError(t, err)
+	require.Equal(t, tcs[0].Fu.GetUserVersion(), uv)
+
+	t.Logf("Looking up by the old address no longer works")
+	uv, err = stellar.LookupUserByAccountID(tcs[1].MetaContext(), a1)
+	require.NoError(t, err)
+	require.IsType(t, libkb.NotFoundError{}, err)
 }
 
 func TestUpkeep(t *testing.T) {
@@ -188,7 +223,7 @@ func TestImportExport(t *testing.T) {
 
 	u0, err := tcs[1].G.LoadUserByUID(tcs[0].G.ActiveDevice.UID())
 	require.NoError(t, err)
-	addr := u0.StellarWalletAddress()
+	addr := u0.StellarAccountID()
 	require.False(t, a1.Eq(*addr))
 
 	a2, s2 := randomStellarKeypair()
@@ -205,7 +240,7 @@ func TestImportExport(t *testing.T) {
 
 	u0, err = tcs[1].G.LoadUserByUID(tcs[0].G.ActiveDevice.UID())
 	require.NoError(t, err)
-	addr = u0.StellarWalletAddress()
+	addr = u0.StellarAccountID()
 	require.False(t, a1.Eq(*addr))
 
 	err = srv.ImportSecretKeyLocal(context.Background(), argS2)
@@ -684,6 +719,10 @@ type TestContext struct {
 	Backend *BackendMock
 }
 
+func (tc *TestContext) MetaContext() libkb.MetaContext {
+	return libkb.NewMetaContextForTest(tc.TestContext)
+}
+
 // Create n TestContexts with logged in users
 // Returns (FakeUsers, TestContexts, CleanupFunction)
 func setupNTests(t *testing.T, n int) ([]*TestContext, func()) {
@@ -716,6 +755,7 @@ func setupTestsWithSettings(t *testing.T, settings []usetting) ([]*TestContext, 
 			tc.Tp.DisableUpgradePerUserKey = true
 		}
 		fu, err := kbtest.CreateAndSignupFakeUser("wall", tc.G)
+		t.Logf("xxx fu: %v", spew.Sdump(fu))
 		require.NoError(t, err)
 		tc2 := &TestContext{
 			TestContext: tc,
