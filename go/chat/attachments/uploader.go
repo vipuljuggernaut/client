@@ -71,18 +71,19 @@ type Uploader struct {
 	globals.Contextified
 	utils.DebugLabeler
 
-	store    Store
+	store    *Store
 	ri       func() chat1.RemoteInterface
 	chatUI   func(sessionID int) libkb.ChatUI
 	s3signer s3.Signer
 }
 
-func NewUploader(g *globals.Context, s3signer s3.Signer,
+func NewUploader(g *globals.Context, store *Store, s3signer s3.Signer,
 	ri func() chat1.RemoteInterface,
 	chatUI func(sessionID int) libkb.ChatUI) *Uploader {
 	return &Uploader{
 		Contextified: globals.NewContextified(g),
 		DebugLabeler: utils.NewDebugLabeler(g.GetLog(), "Attachments.Uploader", false),
+		store:        store,
 		ri:           ri,
 		chatUI:       chatUI,
 		s3signer:     s3signer,
