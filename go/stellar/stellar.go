@@ -1140,3 +1140,54 @@ func MakeRequest(m libkb.MetaContext, remoter remote.Remoter, arg MakeRequestArg
 		membersType, keybase1.TLFIdentifyBehavior_CHAT_SKIP, body, chat1.MessageType_REQUESTPAYMENT)
 	return requestID, err
 }
+
+// Lookup a user who has the stellar account ID.
+// Verifies the result against the user's sigchain.
+// If there are multiple users, returns an arbitrary one.
+func LookupUserByAccountID(m libkb.MetaContext, accountID stellar1.AccountID) (uv keybase1.UserVersion, err error) {
+	defer m.CTraceTimed(fmt.Sprintf("Stellar.LookupUserByAccount(%v)", accountID), func() error { return err })()
+	usersUnverified, err := remote.LookupUnverified(m.Ctx(), m.G(), accountID)
+	if err != nil {
+		return uv, err
+	}
+	m.CDebugf("got %v unverified results", len(usersUnverified))
+	if len(usersUnverified) == 0 {
+		return uv, libkb.NotFoundError{Msg: fmt.Sprintf("No user found with account %v", accountID)}
+	}
+	uv = usersUnverified[0]
+	verify := func(forcePoll bool) (retry bool, err error) {
+		defer m.CTraceTimed(fmt.Sprintf("verify(forcePoll:%v, accountID:%v, uv:%v)", forcePoll, accountID, uv), func() error { return err })()
+		upak, _, err := m.G().GetUPAKLoader().LoadV2(
+			libkb.NewLoadUserArgWithMetaContext(m).WithPublicKeyOptional().WithUID(uv.Uid).WithForcePoll(forcePoll))
+		if err != nil {
+			return false, err
+		}
+		genericErr := errors.New("error checking account lookup")
+		if !upak.Current.EldestSeqno.Eq(uv.EldestSeqno) {
+			m.CDebugf("user %v's eldest seqno did not match %v != %v", upak.Current.Username, uv.EldestSeqno, uv.Uid)
+			return true, genericErr
+		}
+		if upak.Current.StellarAccountID == nil {
+			m.CDebugf("user %v has no stellar account", upak.Current.Username)
+			return true, genericErr
+		}
+		if !upak.Current.StellarAccountID.Eq(accountID) {
+			m.CDebugf("user %v has different account %v != %v", upak.Current.Username, upak.Current.StellarAccountID, accountID)
+			return true, genericErr
+		}
+		return nil
+	}
+	retry, err := verify(false)
+	if err == nil {
+		return uv, err
+	}
+	if !retry {
+		return keybase1.UserVersion{}, err
+	}
+	// Try again with ForcePoll in case the previous attempt lost a race.
+	_, err = verify(true)
+	if err != nil {
+		return keybase1.UserVersion{}, err
+	}
+	return uv, err
+}

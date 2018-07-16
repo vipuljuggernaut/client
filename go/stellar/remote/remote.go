@@ -573,3 +573,24 @@ func RequestDetails(ctx context.Context, g *libkb.GlobalContext, requestID stell
 	}
 	return res.Request, nil
 }
+
+type lookupUnverifiedResult struct {
+	libkb.AppStatusEmbed
+	Users []keybase1.UserVersion `json:"users"`
+}
+
+func LookupUnverified(ctx context.Context, g *libkb.GlobalContext, accountID stellar1.AccountID) (ret []keybase1.UserVersion, err error) {
+	apiArg := libkb.APIArg{
+		Endpoint:    "stellar/lookup",
+		SessionType: libkb.APISessionTypeOPTIONAL,
+		Args: libkb.HTTPArgs{
+			"account_id": libkb.S{Val: accountID.String()},
+		},
+		MetaContext: libkb.NewMetaContext(ctx, g),
+	}
+	var res lookupUnverifiedResult
+	if err := g.API.GetDecode(apiArg, &res); err != nil {
+		return ret, err
+	}
+	return res.Users, nil
+}
