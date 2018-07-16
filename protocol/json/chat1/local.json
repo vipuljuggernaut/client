@@ -2214,34 +2214,6 @@
     },
     {
       "type": "record",
-      "name": "LocalSource",
-      "fields": [
-        {
-          "type": "keybase1.Stream",
-          "name": "source"
-        },
-        {
-          "type": "string",
-          "name": "filename"
-        },
-        {
-          "type": "int",
-          "name": "size"
-        }
-      ]
-    },
-    {
-      "type": "record",
-      "name": "LocalFileSource",
-      "fields": [
-        {
-          "type": "string",
-          "name": "filename"
-        }
-      ]
-    },
-    {
-      "type": "record",
       "name": "DownloadAttachmentLocalRes",
       "fields": [
         {
@@ -3193,64 +3165,6 @@
       "response": "GetMessagesLocalRes",
       "lint": "ignore"
     },
-    "postAttachmentLocal": {
-      "request": [
-        {
-          "name": "sessionID",
-          "type": "int"
-        },
-        {
-          "name": "conversationID",
-          "type": "ConversationID"
-        },
-        {
-          "name": "tlfName",
-          "type": "string"
-        },
-        {
-          "name": "visibility",
-          "type": "keybase1.TLFVisibility"
-        },
-        {
-          "name": "attachment",
-          "type": "LocalSource"
-        },
-        {
-          "name": "preview",
-          "type": [
-            null,
-            "MakePreviewRes"
-          ]
-        },
-        {
-          "name": "title",
-          "type": "string"
-        },
-        {
-          "name": "metadata",
-          "type": "bytes"
-        },
-        {
-          "name": "identifyBehavior",
-          "type": "keybase1.TLFIdentifyBehavior"
-        },
-        {
-          "name": "outboxID",
-          "type": [
-            null,
-            "OutboxID"
-          ]
-        },
-        {
-          "name": "ephemeralLifetime",
-          "type": [
-            null,
-            "gregor1.DurationSec"
-          ]
-        }
-      ],
-      "response": "PostLocalRes"
-    },
     "postFileAttachmentLocal": {
       "request": [
         {
@@ -3270,15 +3184,8 @@
           "type": "keybase1.TLFVisibility"
         },
         {
-          "name": "attachment",
-          "type": "LocalFileSource"
-        },
-        {
-          "name": "preview",
-          "type": [
-            null,
-            "MakePreviewRes"
-          ]
+          "name": "filename",
+          "type": "string"
         },
         {
           "name": "title",
@@ -3291,6 +3198,10 @@
         {
           "name": "identifyBehavior",
           "type": "keybase1.TLFIdentifyBehavior"
+        },
+        {
+          "name": "nonblock",
+          "type": "boolean"
         },
         {
           "name": "outboxID",
@@ -3376,8 +3287,8 @@
           "type": "int"
         },
         {
-          "name": "attachment",
-          "type": "LocalFileSource"
+          "name": "filename",
+          "type": "string"
         },
         {
           "name": "outboxID",

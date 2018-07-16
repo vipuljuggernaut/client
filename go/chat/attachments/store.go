@@ -17,7 +17,7 @@ import (
 	"github.com/keybase/client/go/chat/signencrypt"
 	"github.com/keybase/client/go/chat/utils"
 	"github.com/keybase/client/go/protocol/chat1"
-	"github.com/keybase/client/go/protocol/keybase1"
+	"github.com/keybase/client/go/protocol/gregor1"
 	"golang.org/x/net/context"
 )
 
@@ -34,7 +34,7 @@ type UploadTask struct {
 	plaintextHash  []byte
 	S3Signer       s3.Signer
 	ConversationID chat1.ConversationID
-	UserID         keybase1.UID
+	UserID         gregor1.UID
 	Progress       types.ProgressReporter
 }
 

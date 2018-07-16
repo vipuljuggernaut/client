@@ -361,13 +361,6 @@ func (c *chatServiceHandler) AttachV1(ctx context.Context, opts attachOptionsV1)
 	}
 	rl = append(rl, header.rateLimits...)
 
-	info, fsource, err := c.fileInfo(opts.Filename)
-	if err != nil {
-		return c.errReply(err)
-	}
-	defer fsource.Close()
-	src := c.G().XStreams.ExportReader(fsource)
-
 	vis := keybase1.TLFVisibility_PRIVATE
 	if header.clientHeader.TlfPublic {
 		vis = keybase1.TLFVisibility_PUBLIC
@@ -377,25 +370,13 @@ func (c *chatServiceHandler) AttachV1(ctx context.Context, opts attachOptionsV1)
 	if header.clientHeader.EphemeralMetadata != nil {
 		ephemeralLifetime = &header.clientHeader.EphemeralMetadata.Lifetime
 	}
-	arg := chat1.PostAttachmentLocalArg{
-		ConversationID: header.conversationID,
-		TlfName:        header.clientHeader.TlfName,
-		Visibility:     vis,
-		Attachment: chat1.LocalSource{
-			Filename: info.Name(),
-			Size:     int(info.Size()),
-			Source:   src,
-		},
+	arg := chat1.PostFileAttachmentLocalArg{
+		ConversationID:    header.conversationID,
+		TlfName:           header.clientHeader.TlfName,
+		Visibility:        vis,
+		Filename:          opts.Filename,
 		Title:             opts.Title,
 		EphemeralLifetime: ephemeralLifetime,
-	}
-
-	// check for preview
-	if len(opts.Preview) > 0 {
-		loc := chat1.NewPreviewLocationWithFile(opts.Preview)
-		arg.Preview = &chat1.MakePreviewRes{
-			Location: &loc,
-		}
 	}
 
 	ui := &ChatUI{
@@ -414,7 +395,7 @@ func (c *chatServiceHandler) AttachV1(ctx context.Context, opts attachOptionsV1)
 	if err := RegisterProtocolsWithContext(protocols, c.G()); err != nil {
 		return c.errReply(err)
 	}
-	pres, err := client.PostAttachmentLocal(ctx, arg)
+	pres, err := client.PostFileAttachmentLocal(ctx, arg)
 	if err != nil {
 		return c.errReply(err)
 	}
@@ -464,22 +445,12 @@ func (c *chatServiceHandler) attachV1NoStream(ctx context.Context, opts attachOp
 		ephemeralLifetime = &header.clientHeader.EphemeralMetadata.Lifetime
 	}
 	arg := chat1.PostFileAttachmentLocalArg{
-		ConversationID: header.conversationID,
-		TlfName:        header.clientHeader.TlfName,
-		Visibility:     vis,
-		Attachment: chat1.LocalFileSource{
-			Filename: opts.Filename,
-		},
+		ConversationID:    header.conversationID,
+		TlfName:           header.clientHeader.TlfName,
+		Visibility:        vis,
+		Filename:          opts.Filename,
 		Title:             opts.Title,
 		EphemeralLifetime: ephemeralLifetime,
-	}
-
-	// check for preview
-	if len(opts.Preview) > 0 {
-		loc := chat1.NewPreviewLocationWithFile(opts.Preview)
-		arg.Preview = &chat1.MakePreviewRes{
-			Location: &loc,
-		}
 	}
 
 	ui := &ChatUI{
