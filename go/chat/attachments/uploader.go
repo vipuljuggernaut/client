@@ -246,6 +246,7 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 		if err := u.setStatus(bgctx, outboxID, ures); err != nil {
 			u.Debug(bgctx, "failed to set status on upload success: %s", err)
 		}
+		u.Debug(bgctx, "upload: upload complete: status: %v err: %s", ures.Status, ures.Error)
 		// Ping Deliverer to notify that some of the message in the outbox might be read to send
 		u.G().MessageDeliverer.ForceDeliverLoop(bgctx)
 		res <- ures
