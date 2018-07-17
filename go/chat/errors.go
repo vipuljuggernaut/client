@@ -412,6 +412,22 @@ func (e UnknownTLFNameError) Error() string {
 
 //=============================================================================
 
+type AttachmentUploadError struct {
+	Msg string
+}
+
+func NewAttachmentUploadError(msg string) AttachmentUploadError {
+	return AttachmentUploadError{
+		Msg: msg,
+	}
+}
+
+func (e AttachmentUploadError) Error() string {
+	return fmt.Sprintf("attachment failed to upload; %s", e.Msg)
+}
+
+//=============================================================================
+
 type OfflineErrorKind int
 
 const (

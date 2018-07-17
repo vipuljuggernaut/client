@@ -210,7 +210,8 @@ protocol local {
     DUPLICATE_4,
     EXPIRED_5,
     TOOMANYATTEMPTS_6,
-    ALREADY_DELETED_7
+    ALREADY_DELETED_7,
+    UPLOADFAILED_8
   }
 
   record OutboxStateError {
@@ -750,19 +751,22 @@ protocol local {
     array<keybase1.TLFIdentifyFailure> identifyFailures;
   }
 
-  // Post an attachment from file source to conversationID.
-  PostLocalRes postFileAttachmentLocal(int sessionID, ConversationID conversationID,
-    string tlfName,
-    keybase1.TLFVisibility visibility,
-    string filename,
-    string title,
-    bytes metadata,
-    keybase1.TLFIdentifyBehavior identifyBehavior,
-    boolean nonblock,
+  record PostFileAttachmentArg {
+    ConversationID conversationID;
+    string tlfName;
+    keybase1.TLFVisibility visibility;
+    string filename;
+    string title;
+    bytes metadata;
+    keybase1.TLFIdentifyBehavior identifyBehavior;
     
-    union {null, OutboxID } outboxID,
-    union {null, gregor1.DurationSec} ephemeralLifetime
-  );
+    union {null, OutboxID } outboxID;
+    union {null, gregor1.DurationSec} ephemeralLifetime;
+  }
+
+  // Post an attachment from file source to conversationID.
+  PostLocalRes postFileAttachmentLocal(PostFileAttachmentArg arg);
+  PostLocalNonblockRes postFileAttachmentLocalNonblock(PostFileAttachmentArg arg);
 
   record DownloadAttachmentLocalRes {
     boolean offline;

@@ -390,3 +390,22 @@ func (e *ErrorWrapper) Details() string {
 		return fmt.Sprintf("%s: error %q, no details for type %T", e.prefix, e.err, e.err)
 	}
 }
+
+type S3Signer struct {
+	ri func() chat1.RemoteInterface
+}
+
+func NewS3Signer(ri func() chat1.RemoteInterface) *S3Signer {
+	return &S3Signer{
+		ri: ri,
+	}
+}
+
+// Sign implements github.com/keybase/go/chat/s3.Signer interface.
+func (s *S3Signer) Sign(payload []byte) ([]byte, error) {
+	arg := chat1.S3SignArg{
+		Payload: payload,
+		Version: 1,
+	}
+	return s.ri().S3Sign(context.Background(), arg)
+}

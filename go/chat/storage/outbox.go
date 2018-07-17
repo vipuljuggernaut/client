@@ -371,6 +371,30 @@ func (o *Outbox) RetryMessage(ctx context.Context, obid chat1.OutboxID,
 	return nil
 }
 
+func (o *Outbox) UpdateMessage(ctx context.Context, replaceobr chat1.OutboxRecord) error {
+	locks.Outbox.Lock()
+	defer locks.Outbox.Unlock()
+	obox, err := o.readDiskOutbox(ctx)
+	if err != nil {
+		return o.maybeNuke(err, o.dbKey())
+	}
+	// Scan to find the message and replace it
+	var recs []chat1.OutboxRecord
+	for _, obr := range obox.Records {
+		if !obr.OutboxID.Eq(&replaceobr.OutboxID) {
+			recs = append(recs, obr)
+		} else {
+			recs = append(recs, replaceobr)
+		}
+	}
+	obox.Records = recs
+	if err := o.writeDiskBox(ctx, o.dbKey(), obox); err != nil {
+		return o.maybeNuke(NewInternalError(ctx, o.DebugLabeler,
+			"error writing outbox: err: %s", err.Error()), o.dbKey())
+	}
+	return nil
+}
+
 func (o *Outbox) RemoveMessage(ctx context.Context, obid chat1.OutboxID) error {
 	locks.Outbox.Lock()
 	defer locks.Outbox.Unlock()

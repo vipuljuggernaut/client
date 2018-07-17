@@ -18,6 +18,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type UploaderTaskStatus int
+
+const (
+	UploaderTaskStatusUploading UploaderTaskStatus = iota
+	UploaderTaskStatusSuccess
+	UploaderTaskStatusFailed
+)
+
 type fileReadResetter struct {
 	filename string
 	file     *os.File
@@ -63,31 +71,27 @@ func (f *fileReadResetter) Close() error {
 	return nil
 }
 
-type uploaderJob struct {
-	OutboxID chat1.OutboxID
-}
-
 type Uploader struct {
 	globals.Contextified
 	utils.DebugLabeler
 
 	store    *Store
 	ri       func() chat1.RemoteInterface
-	chatUI   func(sessionID int) libkb.ChatUI
 	s3signer s3.Signer
 }
 
-func NewUploader(g *globals.Context, store *Store, s3signer s3.Signer,
-	ri func() chat1.RemoteInterface,
-	chatUI func(sessionID int) libkb.ChatUI) *Uploader {
+func NewUploader(g *globals.Context, store *Store, s3signer s3.Signer, ri func() chat1.RemoteInterface) *Uploader {
 	return &Uploader{
 		Contextified: globals.NewContextified(g),
 		DebugLabeler: utils.NewDebugLabeler(g.GetLog(), "Attachments.Uploader", false),
 		store:        store,
 		ri:           ri,
-		chatUI:       chatUI,
 		s3signer:     s3signer,
 	}
+}
+
+func (u *Uploader) Store() *Store {
+	return u.store
 }
 
 func (u *Uploader) dbKey(outboxID chat1.OutboxID) libkb.DbKey {
@@ -97,28 +101,48 @@ func (u *Uploader) dbKey(outboxID chat1.OutboxID) libkb.DbKey {
 	}
 }
 
-func (u *Uploader) Complete(ctx context.Context, outboxID chat1.OutboxID) error {
-	return errors.New("not implemented")
-}
-
 func (u *Uploader) Retry(ctx context.Context, outboxID chat1.OutboxID) error {
 	return errors.New("not implemented")
 }
 
-type UploadRegisterRes struct {
+type UploadStatus struct {
+	Status     UploaderTaskStatus
 	Error      error
 	Object     chat1.Asset
 	Preview    *chat1.Asset
+	Metadata   []byte
 	Preprocess Preprocess
 }
 
+func (u *Uploader) Status(ctx context.Context, outboxID chat1.OutboxID) (res UploadStatus, err error) {
+	key := u.dbKey(outboxID)
+	found, err := u.G().GetKVStore().GetInto(&res, key)
+	if err != nil {
+		return res, err
+	}
+	if !found {
+		return res, libkb.NotFoundError{Msg: "no upload with given outbox ID"}
+	}
+	return res, nil
+}
+
+func (u *Uploader) setStatus(ctx context.Context, outboxID chat1.OutboxID, status UploadStatus) error {
+	key := u.dbKey(outboxID)
+	return u.G().GetKVStore().PutObj(key, nil, status)
+}
+
 func (u *Uploader) Register(ctx context.Context, uid gregor1.UID, convID chat1.ConversationID,
-	outboxID chat1.OutboxID, title, filename string) (chan UploadRegisterRes, error) {
-	return u.upload(ctx, uid, convID, outboxID, title, filename)
+	outboxID chat1.OutboxID, title, filename string, metadata []byte, chatUI func(sessionID int) libkb.ChatUI) (chan UploadStatus, error) {
+	var status UploadStatus
+	status.Status = UploaderTaskStatusUploading
+	if err := u.setStatus(ctx, outboxID, status); err != nil {
+		return nil, err
+	}
+	return u.upload(ctx, uid, convID, outboxID, title, filename, metadata, chatUI)
 }
 
 func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.ConversationID,
-	outboxID chat1.OutboxID, title, filename string) (res chan UploadRegisterRes, err error) {
+	outboxID chat1.OutboxID, title, filename string, metadata []byte, chatUI func(sessionID int) libkb.ChatUI) (res chan UploadStatus, err error) {
 	// Stat the file to get size
 	finfo, err := os.Stat(filename)
 	if err != nil {
@@ -138,11 +162,12 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			BytesComplete: bytesComplete,
 			BytesTotal:    bytesTotal,
 		}
-		u.chatUI(0).ChatAttachmentUploadProgress(ctx, parg)
+		chatUI(0).ChatAttachmentUploadProgress(ctx, parg)
 	}
 
 	// preprocess asset (get content type, create preview if possible) arg.SessionID,
-	var ures UploadRegisterRes
+	var ures UploadStatus
+	ures.Metadata = metadata
 	ures.Preprocess, err = u.PreprocessAsset(ctx, filename)
 	if err != nil {
 		return res, err
@@ -159,7 +184,7 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 	var g errgroup.Group
 	u.Debug(ctx, "upload: uploading assets")
 	g.Go(func() error {
-		u.chatUI(0).ChatAttachmentUploadStart(ctx, ures.Preprocess.BaseMetadata(), 0)
+		chatUI(0).ChatAttachmentUploadStart(ctx, ures.Preprocess.BaseMetadata(), 0)
 		var err error
 		task := UploadTask{
 			S3Params:       params,
@@ -185,7 +210,7 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 
 	if ures.Preprocess.Preview != nil {
 		g.Go(func() error {
-			u.chatUI(0).ChatAttachmentPreviewUploadStart(ctx, ures.Preprocess.PreviewMetadata())
+			chatUI(0).ChatAttachmentPreviewUploadStart(ctx, ures.Preprocess.PreviewMetadata())
 			// copy the params so as not to mess with the main params above
 			previewParams := params
 
@@ -203,7 +228,7 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 				Progress:       progress,
 			}
 			preview, err := u.store.UploadAsset(ctx, &task)
-			u.chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
+			chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
 			if err == nil {
 				ures.Preview = &preview
 				ures.Preview.MimeType = ures.Preprocess.ContentType
@@ -216,17 +241,23 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 		})
 	} else {
 		g.Go(func() error {
-			u.chatUI(0).ChatAttachmentPreviewUploadStart(ctx, chat1.AssetMetadata{})
-			u.chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
+			chatUI(0).ChatAttachmentPreviewUploadStart(ctx, chat1.AssetMetadata{})
+			chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
 			return nil
 		})
 	}
-
-	res = make(chan UploadRegisterRes, 1)
+	res = make(chan UploadStatus, 1)
 	go func() {
 		if err := g.Wait(); err != nil {
+			ures.Status = UploaderTaskStatusFailed
 			ures.Error = err
 		}
+		ures.Status = UploaderTaskStatusSuccess
+		if err := u.setStatus(context.Background(), outboxID, ures); err != nil {
+			u.Debug(context.Background(), "failed to set status on upload success: %s", err)
+		}
+		// Ping Deliverer to notify that some of the message in the outbox might be read to send
+		u.G().MessageDeliverer.ForceDeliverLoop(context.Background())
 		res <- ures
 	}()
 	return res, nil

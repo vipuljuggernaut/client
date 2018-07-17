@@ -49,7 +49,7 @@ type Server struct {
 	serverConn     ServerConnection
 	uiSource       UISource
 	boxer          *Boxer
-	store          *attachments.Store
+	uploader       *attachments.Uploader
 	identNotifier  types.IdentifyNotifier
 	clock          clockwork.Clock
 	convPageStatus map[string]chat1.Pagination
@@ -63,19 +63,20 @@ type Server struct {
 
 var _ chat1.LocalInterface = (*Server)(nil)
 
-func NewServer(g *globals.Context, store *attachments.Store, serverConn ServerConnection,
-	uiSource UISource) *Server {
-	return &Server{
+func NewServer(g *globals.Context, serverConn ServerConnection, uiSource UISource) *Server {
+	s := &Server{
 		Contextified:   globals.NewContextified(g),
 		DebugLabeler:   utils.NewDebugLabeler(g.GetLog(), "Server", false),
 		serverConn:     serverConn,
 		uiSource:       uiSource,
-		store:          store,
 		boxer:          NewBoxer(g),
 		identNotifier:  NewCachingIdentifyNotifier(g),
 		clock:          clockwork.NewRealClock(),
 		convPageStatus: make(map[string]chat1.Pagination),
 	}
+	s.uploader = attachments.NewUploader(g, attachments.NewStore(g.GetLog(), g.GetRuntimeDir()),
+		attachments.NewS3Signer(s.remoteClient), s.remoteClient)
+	return s
 }
 
 func (h *Server) SetClock(clock clockwork.Clock) {
@@ -1107,7 +1108,7 @@ func (h *Server) PostLocal(ctx context.Context, arg chat1.PostLocalArg) (res cha
 	}
 	arg.Msg.ClientHeader.EphemeralMetadata = metadata
 
-	sender := NewBlockingSender(h.G(), h.boxer, h.store, h.remoteClient)
+	sender := NewBlockingSender(h.G(), h.boxer, h.remoteClient)
 
 	_, msgBoxed, err := sender.Send(ctx, arg.ConversationID, arg.Msg, 0, nil)
 	if err != nil {
@@ -1363,7 +1364,7 @@ func (h *Server) PostLocalNonblock(ctx context.Context, arg chat1.PostLocalNonbl
 	arg.Msg.ClientHeader.EphemeralMetadata = metadata
 
 	// Create non block sender
-	sender := NewBlockingSender(h.G(), h.boxer, h.store, h.remoteClient)
+	sender := NewBlockingSender(h.G(), h.boxer, h.remoteClient)
 	nonblockSender := NewNonblockingSender(h.G(), sender)
 
 	obid, _, err := nonblockSender.Send(ctx, arg.ConversationID, arg.Msg, arg.ClientPrev, arg.OutboxID)
@@ -1432,8 +1433,7 @@ func (h *Server) processReactionMessage(ctx context.Context, uid gregor1.UID, co
 // MakePreview implements chat1.LocalInterface.MakePreview.
 func (h *Server) MakePreview(ctx context.Context, arg chat1.MakePreviewArg) (res chat1.MakePreviewRes, err error) {
 	defer h.Trace(ctx, func() error { return err }, "MakePreview")()
-	uploader := attachments.NewUploader(h.G(), h.store, h, h.remoteClient, h.getChatUI)
-	pre, err := uploader.PreprocessAsset(ctx, arg.Filename)
+	pre, err := h.uploader.PreprocessAsset(ctx, arg.Filename)
 	if err != nil {
 		return chat1.MakePreviewRes{}, err
 	}
@@ -1465,33 +1465,68 @@ func (h *Server) MakePreview(ctx context.Context, arg chat1.MakePreviewArg) (res
 	return res, nil
 }
 
+func (h *Server) initiateAttachmentUpload(ctx context.Context, arg chat1.PostFileAttachmentArg) (uresChan chan attachments.UploadStatus, msg chat1.MessagePlaintext, err error) {
+	if arg.OutboxID == nil {
+		arg.OutboxID = new(chat1.OutboxID)
+		if *arg.OutboxID, err = storage.NewOutboxID(); err != nil {
+			return uresChan, msg, err
+		}
+	}
+	uid := h.getUID()
+	uresChan, err = h.uploader.Register(ctx, uid, arg.ConversationID, *arg.OutboxID, arg.Title,
+		arg.Filename, arg.Metadata, h.getChatUI)
+	if err != nil {
+		return uresChan, msg, err
+	}
+	msg = chat1.MessagePlaintext{
+		ClientHeader: chat1.MessageClientHeader{
+			MessageType: chat1.MessageType_ATTACHMENT,
+			TlfName:     arg.TlfName,
+			TlfPublic:   arg.Visibility == keybase1.TLFVisibility_PUBLIC,
+			OutboxID:    arg.OutboxID,
+		},
+	}
+	if arg.EphemeralLifetime != nil {
+		msg.ClientHeader.EphemeralMetadata = &chat1.MsgEphemeralMetadata{
+			Lifetime: *arg.EphemeralLifetime,
+		}
+	}
+	return uresChan, msg, nil
+}
+
+func (h *Server) PostFileAttachmentLocalNonblock(ctx context.Context, arg chat1.PostFileAttachmentArg) (res chat1.PostLocalNonblockRes, err error) {
+	var identBreaks []keybase1.TLFIdentifyFailure
+	ctx = Context(ctx, h.G(), arg.IdentifyBehavior, &identBreaks, h.identNotifier)
+	defer h.Trace(ctx, func() error { return err }, "PostFileAttachmentLocalNonblock")()
+	defer func() { h.setResultRateLimit(ctx, &res) }()
+	if os.Getenv("CHAT_S3_FAKE") == "1" {
+		ctx = s3.NewFakeS3Context(ctx)
+	}
+	_, msg, err := h.initiateAttachmentUpload(ctx, arg)
+	if err != nil {
+		return res, err
+	}
+	return h.PostLocalNonblock(ctx, chat1.PostLocalNonblockArg{
+		ConversationID:   arg.ConversationID,
+		IdentifyBehavior: arg.IdentifyBehavior,
+		Msg:              msg,
+		OutboxID:         msg.ClientHeader.OutboxID,
+	})
+}
+
 // PostFileAttachmentLocal implements chat1.LocalInterface.PostFileAttachmentLocal.
-func (h *Server) PostFileAttachmentLocal(ctx context.Context, arg chat1.PostFileAttachmentLocalArg) (res chat1.PostLocalRes, err error) {
+func (h *Server) PostFileAttachmentLocal(ctx context.Context, arg chat1.PostFileAttachmentArg) (res chat1.PostLocalRes, err error) {
 	var identBreaks []keybase1.TLFIdentifyFailure
 	ctx = Context(ctx, h.G(), arg.IdentifyBehavior, &identBreaks, h.identNotifier)
 	defer h.Trace(ctx, func() error { return err }, "PostFileAttachmentLocal")()
 	defer func() { h.setResultRateLimit(ctx, &res) }()
-
 	if os.Getenv("CHAT_S3_FAKE") == "1" {
 		ctx = s3.NewFakeS3Context(ctx)
 	}
 
-	if arg.OutboxID == nil {
-		arg.OutboxID = new(chat1.OutboxID)
-		if *arg.OutboxID, err = storage.NewOutboxID(); err != nil {
-			return res, err
-		}
-	}
-
-	uid := h.getUID()
-	uploader := attachments.NewUploader(h.G(), h.store, h, h.remoteClient, h.getChatUI)
-	uresChan, err := uploader.Register(ctx, uid, arg.ConversationID, *arg.OutboxID, arg.Title, arg.Filename)
-	if err != nil {
-		return res, err
-	}
+	uresChan, msg, err := h.initiateAttachmentUpload(ctx, arg)
 	// Wait for upload
 	ures := <-uresChan
-
 	attachment := chat1.MessageAttachment{
 		Object:   ures.Object,
 		Metadata: arg.Metadata,
@@ -1502,29 +1537,14 @@ func (h *Server) PostFileAttachmentLocal(ctx context.Context, arg chat1.PostFile
 		attachment.Previews = []chat1.Asset{*ures.Preview}
 		attachment.Preview = ures.Preview
 	}
-
-	// edit the placeholder  attachment message with the asset information
-	postArg := chat1.PostLocalArg{
-		ConversationID: arg.ConversationID,
-		Msg: chat1.MessagePlaintext{
-			MessageBody: chat1.NewMessageBodyWithAttachment(attachment),
-		},
-		IdentifyBehavior: arg.IdentifyBehavior,
-	}
-
-	// set msg client header explicitly
-	postArg.Msg.ClientHeader.MessageType = chat1.MessageType_ATTACHMENT
-	postArg.Msg.ClientHeader.TlfName = arg.TlfName
-	postArg.Msg.ClientHeader.TlfPublic = arg.Visibility == keybase1.TLFVisibility_PUBLIC
-
-	if arg.EphemeralLifetime != nil {
-		postArg.Msg.ClientHeader.EphemeralMetadata = &chat1.MsgEphemeralMetadata{
-			Lifetime: *arg.EphemeralLifetime,
-		}
-	}
+	msg.MessageBody = chat1.NewMessageBodyWithAttachment(attachment)
 
 	h.Debug(ctx, "postAttachmentLocal: attachment assets uploaded, posting attachment message")
-	plres, err := h.PostLocal(ctx, postArg)
+	plres, err := h.PostLocal(ctx, chat1.PostLocalArg{
+		ConversationID:   arg.ConversationID,
+		IdentifyBehavior: arg.IdentifyBehavior,
+		Msg:              msg,
+	})
 	if err != nil {
 		h.Debug(ctx, "postAttachmentLocal: error posting attachment message: %s", err)
 	} else {
@@ -1617,7 +1637,8 @@ func (h *Server) downloadAttachmentLocal(ctx context.Context, uid gregor1.UID, a
 	}
 	chatUI.ChatAttachmentDownloadStart(ctx)
 	fetcher := h.G().AttachmentURLSrv.GetAttachmentFetcher()
-	if err := fetcher.FetchAttachment(ctx, arg.Sink, arg.ConversationID, obj, h.remoteClient, h, progress); err != nil {
+	if err := fetcher.FetchAttachment(ctx, arg.Sink, arg.ConversationID, obj, h.remoteClient,
+		attachments.NewS3Signer(h.remoteClient), progress); err != nil {
 		arg.Sink.Close()
 		return chat1.DownloadAttachmentLocalRes{}, err
 	}
@@ -1691,15 +1712,6 @@ func (h *Server) assertLoggedInUID(ctx context.Context) (uid gregor1.UID, err er
 		return uid, libkb.LoginRequiredError{}
 	}
 	return gregor1.UID(k1uid.ToBytes()), nil
-}
-
-// Sign implements github.com/keybase/go/chat/s3.Signer interface.
-func (h *Server) Sign(payload []byte) ([]byte, error) {
-	arg := chat1.S3SignArg{
-		Payload: payload,
-		Version: 1,
-	}
-	return h.remoteClient().S3Sign(context.Background(), arg)
 }
 
 func (h *Server) FindConversationsLocal(ctx context.Context,

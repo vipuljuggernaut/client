@@ -34,14 +34,13 @@ type BlockingSender struct {
 
 var _ types.Sender = (*BlockingSender)(nil)
 
-func NewBlockingSender(g *globals.Context, boxer *Boxer, store *attachments.Store,
-	getRi func() chat1.RemoteInterface) *BlockingSender {
+func NewBlockingSender(g *globals.Context, boxer *Boxer, getRi func() chat1.RemoteInterface) *BlockingSender {
 	return &BlockingSender{
 		Contextified:      globals.NewContextified(g),
 		DebugLabeler:      utils.NewDebugLabeler(g.GetLog(), "BlockingSender", false),
 		getRi:             getRi,
 		boxer:             boxer,
-		store:             store,
+		store:             attachments.NewStore(g.GetLog(), g.GetRuntimeDir()),
 		prevPtrPagination: &chat1.Pagination{Num: 50},
 	}
 }
@@ -692,6 +691,7 @@ type Deliverer struct {
 
 	sender        types.Sender
 	outbox        *storage.Outbox
+	uploader      *attachments.Uploader
 	identNotifier types.IdentifyNotifier
 	shutdownCh    chan chan struct{}
 	msgSentCh     chan struct{}
@@ -707,7 +707,7 @@ type Deliverer struct {
 
 var _ types.MessageDeliverer = (*Deliverer)(nil)
 
-func NewDeliverer(g *globals.Context, sender types.Sender) *Deliverer {
+func NewDeliverer(g *globals.Context, sender types.Sender, uploader *attachments.Uploader) *Deliverer {
 	d := &Deliverer{
 		Contextified:  globals.NewContextified(g),
 		DebugLabeler:  utils.NewDebugLabeler(g.GetLog(), "Deliverer", false),
@@ -885,6 +885,40 @@ func (s *Deliverer) failMessage(ctx context.Context, obr chat1.OutboxRecord,
 	return nil
 }
 
+var errDelivererUploadInProgress = errors.New("attachment upload in progress")
+
+func (s *Deliverer) processAttachment(ctx context.Context, obr chat1.OutboxRecord) (chat1.OutboxRecord, error) {
+	if obr.Msg.ClientHeader.MessageType != chat1.MessageType_ATTACHMENT {
+		return obr, nil
+	}
+	status, err := s.uploader.Status(ctx, obr.OutboxID)
+	if err != nil {
+		return obr, err
+	}
+	switch status.Status {
+	case attachments.UploaderTaskStatusSuccess:
+		// Modify the attachment message
+		att := chat1.MessageAttachment{
+			Object:   status.Object,
+			Metadata: status.Metadata,
+			Uploaded: true,
+			Preview:  status.Preview,
+		}
+		if status.Preview != nil {
+			att.Previews = []chat1.Asset{*status.Preview}
+		}
+		obr.Msg.MessageBody = chat1.NewMessageBodyWithAttachment(att)
+		if err := s.outbox.UpdateMessage(ctx, obr); err != nil {
+			return obr, err
+		}
+	case attachments.UploaderTaskStatusFailed:
+		return obr, NewAttachmentUploadError(status.Error.Error())
+	case attachments.UploaderTaskStatusUploading:
+		return obr, errDelivererUploadInProgress
+	}
+	return obr, nil
+}
+
 func (s *Deliverer) deliverLoop() {
 	bgctx := context.Background()
 	s.Debug(bgctx, "deliverLoop: starting non blocking sender deliver loop: uid: %s duration: %v",
@@ -930,28 +964,37 @@ func (s *Deliverer) deliverLoop() {
 			} else if s.clock.Now().Sub(obr.Ctime.Time()) > 10*time.Minute {
 				// If we are re-trying a message after 10 minutes, let's just give up. These times can
 				// get very long if the app is suspended on mobile.
-				s.Debug(bgctx, "deliverLoop: expiring pending message because it is too old: obid: %s dur: %v",
+				s.Debug(bctx, "deliverLoop: expiring pending message because it is too old: obid: %s dur: %v",
 					obr.OutboxID, s.clock.Now().Sub(obr.Ctime.Time()))
 				err = delivererExpireError{}
 			} else {
-				_, _, err = s.sender.Send(bctx, obr.ConvID, obr.Msg, 0, nil)
+				// Check for an attachment message and process based on upload status
+				obr, err = s.processAttachment(bctx, obr)
+				if err == errDelivererUploadInProgress {
+					s.Debug(bctx, "deliverLoop: attachment upload in progress, skipping: convID: %s obid: %s",
+						obr.ConvID, obr.OutboxID)
+					continue
+				}
+				if err != nil {
+					_, _, err = s.sender.Send(bctx, obr.ConvID, obr.Msg, 0, nil)
+				}
 			}
 			if err != nil {
-				s.Debug(bgctx,
+				s.Debug(bctx,
 					"deliverLoop: failed to send msg: uid: %s convID: %s obid: %s err: %s attempts: %d",
 					s.outbox.GetUID(), obr.ConvID, obr.OutboxID, err.Error(), obr.State.Sending())
 
 				// Process failure. If we determine that the message is unrecoverable, then bail out.
-				if errTyp, newErr, ok := s.doNotRetryFailure(bgctx, obr, err); ok {
+				if errTyp, newErr, ok := s.doNotRetryFailure(bctx, obr, err); ok {
 					// Record failure if we hit this case, and put the rest of this loop in a
 					// mode where all other entries also fail.
-					s.Debug(bgctx, "deliverLoop: failure condition reached, marking as error and notifying: obid: %s errTyp: %v attempts: %d", obr.OutboxID, errTyp, obr.State.Sending())
+					s.Debug(bctx, "deliverLoop: failure condition reached, marking as error and notifying: obid: %s errTyp: %v attempts: %d", obr.OutboxID, errTyp, obr.State.Sending())
 
-					if err := s.failMessage(bgctx, obr, chat1.OutboxStateError{
+					if err := s.failMessage(bctx, obr, chat1.OutboxStateError{
 						Message: newErr.Error(),
 						Typ:     errTyp,
 					}); err != nil {
-						s.Debug(bgctx, "deliverLoop: unable to fail message: err: %s", err.Error())
+						s.Debug(bctx, "deliverLoop: unable to fail message: err: %s", err.Error())
 					}
 				} else {
 					if err = s.outbox.RecordFailedAttempt(bgctx, obr); err != nil {
@@ -961,7 +1004,7 @@ func (s *Deliverer) deliverLoop() {
 				}
 				break
 			} else {
-				if err = s.outbox.RemoveMessage(bgctx, obr.OutboxID); err != nil {
+				if err = s.outbox.RemoveMessage(bctx, obr.OutboxID); err != nil {
 					s.Debug(bgctx, "deliverLoop: failed to remove successful message send: %s", err)
 				}
 			}

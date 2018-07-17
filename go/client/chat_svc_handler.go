@@ -366,7 +366,7 @@ func (c *chatServiceHandler) AttachV1(ctx context.Context, opts attachOptionsV1)
 	if header.clientHeader.EphemeralMetadata != nil {
 		ephemeralLifetime = &header.clientHeader.EphemeralMetadata.Lifetime
 	}
-	arg := chat1.PostFileAttachmentLocalArg{
+	arg := chat1.PostFileAttachmentArg{
 		ConversationID:    header.conversationID,
 		TlfName:           header.clientHeader.TlfName,
 		Visibility:        vis,
@@ -391,11 +391,19 @@ func (c *chatServiceHandler) AttachV1(ctx context.Context, opts attachOptionsV1)
 	if err := RegisterProtocolsWithContext(protocols, c.G()); err != nil {
 		return c.errReply(err)
 	}
-	pres, err := client.PostFileAttachmentLocal(ctx, arg)
+
+	if opts.Nonblock {
+		var pres chat1.PostLocalNonblockRes
+		pres, err = client.PostFileAttachmentLocalNonblock(ctx, arg)
+		rl = append(rl, pres.RateLimits...)
+	} else {
+		var pres chat1.PostLocalRes
+		pres, err = client.PostFileAttachmentLocal(ctx, arg)
+		rl = append(rl, pres.RateLimits...)
+	}
 	if err != nil {
 		return c.errReply(err)
 	}
-	rl = append(rl, pres.RateLimits...)
 
 	res := SendRes{
 		Message: "attachment sent",
