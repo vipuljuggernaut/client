@@ -287,3 +287,11 @@ type EphemeralPurger interface {
 
 	Queue(ctx context.Context, purgeInfo chat1.EphemeralPurgeInfo) error
 }
+
+type AttachmentUploader interface {
+	Register(ctx context.Context, uid gregor1.UID, convID chat1.ConversationID,
+		outboxID chat1.OutboxID, title, filename string, metadata []byte,
+		chatUI func(sessionID int) libkb.ChatUI) (chan AttachmentUploadStatus, error)
+	Status(ctx context.Context, outboxID chat1.OutboxID) (res AttachmentUploadStatus, err error)
+	Retry(ctx context.Context, outboxID chat1.OutboxID) error
+}

@@ -4,26 +4,18 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"net/http"
 	"os"
 
 	"github.com/keybase/client/go/chat/globals"
 	"github.com/keybase/client/go/chat/s3"
 	"github.com/keybase/client/go/chat/storage"
+	"github.com/keybase/client/go/chat/types"
 	"github.com/keybase/client/go/chat/utils"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/chat1"
 	"github.com/keybase/client/go/protocol/gregor1"
 	"golang.org/x/net/context"
 	"golang.org/x/sync/errgroup"
-)
-
-type UploaderTaskStatus int
-
-const (
-	UploaderTaskStatusUploading UploaderTaskStatus = iota
-	UploaderTaskStatusSuccess
-	UploaderTaskStatusFailed
 )
 
 type fileReadResetter struct {
@@ -80,6 +72,8 @@ type Uploader struct {
 	s3signer s3.Signer
 }
 
+var _ types.AttachmentUploader = (*Uploader)(nil)
+
 func NewUploader(g *globals.Context, store *Store, s3signer s3.Signer, ri func() chat1.RemoteInterface) *Uploader {
 	return &Uploader{
 		Contextified: globals.NewContextified(g),
@@ -105,16 +99,7 @@ func (u *Uploader) Retry(ctx context.Context, outboxID chat1.OutboxID) error {
 	return errors.New("not implemented")
 }
 
-type UploadStatus struct {
-	Status     UploaderTaskStatus
-	Error      error
-	Object     chat1.Asset
-	Preview    *chat1.Asset
-	Metadata   []byte
-	Preprocess Preprocess
-}
-
-func (u *Uploader) Status(ctx context.Context, outboxID chat1.OutboxID) (res UploadStatus, err error) {
+func (u *Uploader) Status(ctx context.Context, outboxID chat1.OutboxID) (res types.AttachmentUploadStatus, err error) {
 	key := u.dbKey(outboxID)
 	found, err := u.G().GetKVStore().GetInto(&res, key)
 	if err != nil {
@@ -126,15 +111,17 @@ func (u *Uploader) Status(ctx context.Context, outboxID chat1.OutboxID) (res Upl
 	return res, nil
 }
 
-func (u *Uploader) setStatus(ctx context.Context, outboxID chat1.OutboxID, status UploadStatus) error {
+func (u *Uploader) setStatus(ctx context.Context, outboxID chat1.OutboxID,
+	status types.AttachmentUploadStatus) error {
 	key := u.dbKey(outboxID)
 	return u.G().GetKVStore().PutObj(key, nil, status)
 }
 
 func (u *Uploader) Register(ctx context.Context, uid gregor1.UID, convID chat1.ConversationID,
-	outboxID chat1.OutboxID, title, filename string, metadata []byte, chatUI func(sessionID int) libkb.ChatUI) (chan UploadStatus, error) {
-	var status UploadStatus
-	status.Status = UploaderTaskStatusUploading
+	outboxID chat1.OutboxID, title, filename string, metadata []byte,
+	chatUI func(sessionID int) libkb.ChatUI) (chan types.AttachmentUploadStatus, error) {
+	var status types.AttachmentUploadStatus
+	status.Status = types.AttachmentUploaderTaskStatusUploading
 	if err := u.setStatus(ctx, outboxID, status); err != nil {
 		return nil, err
 	}
@@ -142,7 +129,8 @@ func (u *Uploader) Register(ctx context.Context, uid gregor1.UID, convID chat1.C
 }
 
 func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.ConversationID,
-	outboxID chat1.OutboxID, title, filename string, metadata []byte, chatUI func(sessionID int) libkb.ChatUI) (res chan UploadStatus, err error) {
+	outboxID chat1.OutboxID, title, filename string, metadata []byte,
+	chatUI func(sessionID int) libkb.ChatUI) (res chan types.AttachmentUploadStatus, err error) {
 	// Stat the file to get size
 	finfo, err := os.Stat(filename)
 	if err != nil {
@@ -166,16 +154,16 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 	}
 
 	// preprocess asset (get content type, create preview if possible) arg.SessionID,
-	var ures UploadStatus
+	var ures types.AttachmentUploadStatus
 	ures.Metadata = metadata
-	ures.Preprocess, err = u.PreprocessAsset(ctx, filename)
+	pre, err := PreprocessAsset(ctx, u.DebugLabeler, filename)
 	if err != nil {
 		return res, err
 	}
-	if ures.Preprocess.Preview != nil {
+	if pre.Preview != nil {
 		u.Debug(ctx, "upload: created preview in preprocess")
 		// Store the preview in pending storage
-		if err := storage.NewPendingPreviews(u.G()).Put(ctx, outboxID, ures.Preprocess.Preview); err != nil {
+		if err := storage.NewPendingPreviews(u.G()).Put(ctx, outboxID, pre.Preview); err != nil {
 			return res, err
 		}
 	}
@@ -184,7 +172,7 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 	var g errgroup.Group
 	u.Debug(ctx, "upload: uploading assets")
 	g.Go(func() error {
-		chatUI(0).ChatAttachmentUploadStart(ctx, ures.Preprocess.BaseMetadata(), 0)
+		chatUI(0).ChatAttachmentUploadStart(ctx, pre.BaseMetadata(), 0)
 		var err error
 		task := UploadTask{
 			S3Params:       params,
@@ -202,15 +190,15 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			u.Debug(ctx, "upload: error uploading primary asset to s3: %s", err)
 		} else {
 			ures.Object.Title = title
-			ures.Object.MimeType = ures.Preprocess.ContentType
-			ures.Object.Metadata = ures.Preprocess.BaseMetadata()
+			ures.Object.MimeType = pre.ContentType
+			ures.Object.Metadata = pre.BaseMetadata()
 		}
 		return err
 	})
 
-	if ures.Preprocess.Preview != nil {
+	if pre.Preview != nil {
 		g.Go(func() error {
-			chatUI(0).ChatAttachmentPreviewUploadStart(ctx, ures.Preprocess.PreviewMetadata())
+			chatUI(0).ChatAttachmentPreviewUploadStart(ctx, pre.PreviewMetadata())
 			// copy the params so as not to mess with the main params above
 			previewParams := params
 
@@ -220,8 +208,8 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			task := UploadTask{
 				S3Params:       previewParams,
 				Filename:       filename,
-				FileSize:       len(ures.Preprocess.Preview),
-				Plaintext:      newBufReadResetter(ures.Preprocess.Preview),
+				FileSize:       len(pre.Preview),
+				Plaintext:      newBufReadResetter(pre.Preview),
 				S3Signer:       u.s3signer,
 				ConversationID: convID,
 				UserID:         uid,
@@ -231,8 +219,8 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
 			if err == nil {
 				ures.Preview = &preview
-				ures.Preview.MimeType = ures.Preprocess.ContentType
-				ures.Preview.Metadata = ures.Preprocess.PreviewMetadata()
+				ures.Preview.MimeType = pre.ContentType
+				ures.Preview.Metadata = pre.PreviewMetadata()
 				ures.Preview.Tag = chat1.AssetTag_PRIMARY
 			} else {
 				u.Debug(ctx, "upload: error uploading preview asset to s3: %s", err)
@@ -246,13 +234,14 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			return nil
 		})
 	}
-	res = make(chan UploadStatus, 1)
+	res = make(chan types.AttachmentUploadStatus, 1)
 	go func() {
 		if err := g.Wait(); err != nil {
-			ures.Status = UploaderTaskStatusFailed
-			ures.Error = err
+			ures.Status = types.AttachmentUploaderTaskStatusFailed
+			ures.Error = new(string)
+			*ures.Error = err.Error()
 		}
-		ures.Status = UploaderTaskStatusSuccess
+		ures.Status = types.AttachmentUploaderTaskStatusSuccess
 		if err := u.setStatus(context.Background(), outboxID, ures); err != nil {
 			u.Debug(context.Background(), "failed to set status on upload success: %s", err)
 		}
@@ -261,46 +250,4 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 		res <- ures
 	}()
 	return res, nil
-}
-
-func (u *Uploader) PreprocessAsset(ctx context.Context, filename string) (p Preprocess, err error) {
-	src, err := os.Open(filename)
-	if err != nil {
-		return p, err
-	}
-	defer src.Close()
-
-	head := make([]byte, 512)
-	_, err = io.ReadFull(src, head)
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return p, err
-	}
-
-	p = Preprocess{
-		ContentType: http.DetectContentType(head),
-	}
-	u.Debug(ctx, "preprocessAsset: detected attachment content type %s", p.ContentType)
-	if _, err := src.Seek(0, 0); err != nil {
-		return p, err
-	}
-	previewRes, err := Preview(ctx, u.G().Log, src, p.ContentType, filename)
-	if err != nil {
-		u.Debug(ctx, "preprocessAsset: error making preview: %s", err)
-		return p, err
-	}
-	if previewRes != nil {
-		u.Debug(ctx, "preprocessAsset: made preview for attachment asset")
-		p.Preview = previewRes.Source
-		p.PreviewContentType = previewRes.ContentType
-		if previewRes.BaseWidth > 0 || previewRes.BaseHeight > 0 {
-			p.BaseDim = &Dimension{Width: previewRes.BaseWidth, Height: previewRes.BaseHeight}
-		}
-		if previewRes.PreviewWidth > 0 || previewRes.PreviewHeight > 0 {
-			p.PreviewDim = &Dimension{Width: previewRes.PreviewWidth, Height: previewRes.PreviewHeight}
-		}
-		p.BaseDurationMs = previewRes.BaseDurationMs
-		p.PreviewDurationMs = previewRes.PreviewDurationMs
-	}
-
-	return p, nil
 }

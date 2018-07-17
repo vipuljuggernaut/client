@@ -131,3 +131,19 @@ func NewConvLoaderJob(convID chat1.ConversationID, pagination *chat1.Pagination,
 		PostLoadHook: postLoadHook,
 	}
 }
+
+type AttachmentUploaderTaskStatus int
+
+const (
+	AttachmentUploaderTaskStatusUploading AttachmentUploaderTaskStatus = iota
+	AttachmentUploaderTaskStatusSuccess
+	AttachmentUploaderTaskStatusFailed
+)
+
+type AttachmentUploadStatus struct {
+	Status   AttachmentUploaderTaskStatus
+	Error    *string
+	Object   chat1.Asset
+	Preview  *chat1.Asset
+	Metadata []byte
+}

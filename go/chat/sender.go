@@ -691,7 +691,6 @@ type Deliverer struct {
 
 	sender        types.Sender
 	outbox        *storage.Outbox
-	uploader      *attachments.Uploader
 	identNotifier types.IdentifyNotifier
 	shutdownCh    chan chan struct{}
 	msgSentCh     chan struct{}
@@ -707,7 +706,7 @@ type Deliverer struct {
 
 var _ types.MessageDeliverer = (*Deliverer)(nil)
 
-func NewDeliverer(g *globals.Context, sender types.Sender, uploader *attachments.Uploader) *Deliverer {
+func NewDeliverer(g *globals.Context, sender types.Sender) *Deliverer {
 	d := &Deliverer{
 		Contextified:  globals.NewContextified(g),
 		DebugLabeler:  utils.NewDebugLabeler(g.GetLog(), "Deliverer", false),
@@ -891,12 +890,12 @@ func (s *Deliverer) processAttachment(ctx context.Context, obr chat1.OutboxRecor
 	if obr.Msg.ClientHeader.MessageType != chat1.MessageType_ATTACHMENT {
 		return obr, nil
 	}
-	status, err := s.uploader.Status(ctx, obr.OutboxID)
+	status, err := s.G().AttachmentUploader.Status(ctx, obr.OutboxID)
 	if err != nil {
 		return obr, err
 	}
 	switch status.Status {
-	case attachments.UploaderTaskStatusSuccess:
+	case types.AttachmentUploaderTaskStatusSuccess:
 		// Modify the attachment message
 		att := chat1.MessageAttachment{
 			Object:   status.Object,
@@ -911,9 +910,13 @@ func (s *Deliverer) processAttachment(ctx context.Context, obr chat1.OutboxRecor
 		if err := s.outbox.UpdateMessage(ctx, obr); err != nil {
 			return obr, err
 		}
-	case attachments.UploaderTaskStatusFailed:
-		return obr, NewAttachmentUploadError(status.Error.Error())
-	case attachments.UploaderTaskStatusUploading:
+	case types.AttachmentUploaderTaskStatusFailed:
+		errStr := "<unknown>"
+		if status.Error != nil {
+			errStr = *status.Error
+		}
+		return obr, NewAttachmentUploadError(errStr)
+	case types.AttachmentUploaderTaskStatusUploading:
 		return obr, errDelivererUploadInProgress
 	}
 	return obr, nil
@@ -975,7 +978,7 @@ func (s *Deliverer) deliverLoop() {
 						obr.ConvID, obr.OutboxID)
 					continue
 				}
-				if err != nil {
+				if err == nil {
 					_, _, err = s.sender.Send(bctx, obr.ConvID, obr.Msg, 0, nil)
 				}
 			}

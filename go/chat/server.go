@@ -49,7 +49,6 @@ type Server struct {
 	serverConn     ServerConnection
 	uiSource       UISource
 	boxer          *Boxer
-	uploader       *attachments.Uploader
 	identNotifier  types.IdentifyNotifier
 	clock          clockwork.Clock
 	convPageStatus map[string]chat1.Pagination
@@ -64,7 +63,7 @@ type Server struct {
 var _ chat1.LocalInterface = (*Server)(nil)
 
 func NewServer(g *globals.Context, serverConn ServerConnection, uiSource UISource) *Server {
-	s := &Server{
+	return &Server{
 		Contextified:   globals.NewContextified(g),
 		DebugLabeler:   utils.NewDebugLabeler(g.GetLog(), "Server", false),
 		serverConn:     serverConn,
@@ -74,9 +73,6 @@ func NewServer(g *globals.Context, serverConn ServerConnection, uiSource UISourc
 		clock:          clockwork.NewRealClock(),
 		convPageStatus: make(map[string]chat1.Pagination),
 	}
-	s.uploader = attachments.NewUploader(g, attachments.NewStore(g.GetLog(), g.GetRuntimeDir()),
-		attachments.NewS3Signer(s.remoteClient), s.remoteClient)
-	return s
 }
 
 func (h *Server) SetClock(clock clockwork.Clock) {
@@ -1433,7 +1429,7 @@ func (h *Server) processReactionMessage(ctx context.Context, uid gregor1.UID, co
 // MakePreview implements chat1.LocalInterface.MakePreview.
 func (h *Server) MakePreview(ctx context.Context, arg chat1.MakePreviewArg) (res chat1.MakePreviewRes, err error) {
 	defer h.Trace(ctx, func() error { return err }, "MakePreview")()
-	pre, err := h.uploader.PreprocessAsset(ctx, arg.Filename)
+	pre, err := attachments.PreprocessAsset(ctx, h.DebugLabeler, arg.Filename)
 	if err != nil {
 		return chat1.MakePreviewRes{}, err
 	}
@@ -1465,7 +1461,7 @@ func (h *Server) MakePreview(ctx context.Context, arg chat1.MakePreviewArg) (res
 	return res, nil
 }
 
-func (h *Server) initiateAttachmentUpload(ctx context.Context, arg chat1.PostFileAttachmentArg) (uresChan chan attachments.UploadStatus, msg chat1.MessagePlaintext, err error) {
+func (h *Server) initiateAttachmentUpload(ctx context.Context, arg chat1.PostFileAttachmentArg) (uresChan chan types.AttachmentUploadStatus, msg chat1.MessagePlaintext, err error) {
 	if arg.OutboxID == nil {
 		arg.OutboxID = new(chat1.OutboxID)
 		if *arg.OutboxID, err = storage.NewOutboxID(); err != nil {
@@ -1473,7 +1469,7 @@ func (h *Server) initiateAttachmentUpload(ctx context.Context, arg chat1.PostFil
 		}
 	}
 	uid := h.getUID()
-	uresChan, err = h.uploader.Register(ctx, uid, arg.ConversationID, *arg.OutboxID, arg.Title,
+	uresChan, err = h.G().AttachmentUploader.Register(ctx, uid, arg.ConversationID, *arg.OutboxID, arg.Title,
 		arg.Filename, arg.Metadata, h.getChatUI)
 	if err != nil {
 		return uresChan, msg, err

@@ -413,9 +413,9 @@ func (d *Service) createChatModules() {
 
 	// Message sending apparatus
 	store := attachments.NewStore(g.GetLog(), g.GetRuntimeDir())
-	uploader := attachments.NewUploader(g, store, attachments.NewS3Signer(ri), ri)
+	g.AttachmentUploader = attachments.NewUploader(g, store, attachments.NewS3Signer(ri), ri)
 	sender := chat.NewBlockingSender(g, chat.NewBoxer(g), ri)
-	g.MessageDeliverer = chat.NewDeliverer(g, sender, uploader)
+	g.MessageDeliverer = chat.NewDeliverer(g, sender)
 
 	// team channel source
 	g.TeamChannelSource = chat.NewCachingTeamChannelSource(g, ri)
