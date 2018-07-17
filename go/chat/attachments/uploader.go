@@ -171,8 +171,9 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 	// upload attachment and (optional) preview concurrently
 	var g errgroup.Group
 	u.Debug(ctx, "upload: uploading assets")
+	bgctx := context.Background()
 	g.Go(func() error {
-		chatUI(0).ChatAttachmentUploadStart(ctx, pre.BaseMetadata(), 0)
+		chatUI(0).ChatAttachmentUploadStart(bgctx, pre.BaseMetadata(), 0)
 		var err error
 		task := UploadTask{
 			S3Params:       params,
@@ -184,10 +185,10 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			UserID:         uid,
 			Progress:       progress,
 		}
-		ures.Object, err = u.store.UploadAsset(ctx, &task)
-		//chatUI.ChatAttachmentUploadDone(ctx)
+		ures.Object, err = u.store.UploadAsset(bgctx, &task)
+		chatUI(0).ChatAttachmentUploadDone(bgctx)
 		if err != nil {
-			u.Debug(ctx, "upload: error uploading primary asset to s3: %s", err)
+			u.Debug(bgctx, "upload: error uploading primary asset to s3: %s", err)
 		} else {
 			ures.Object.Title = title
 			ures.Object.MimeType = pre.ContentType
@@ -198,7 +199,7 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 
 	if pre.Preview != nil {
 		g.Go(func() error {
-			chatUI(0).ChatAttachmentPreviewUploadStart(ctx, pre.PreviewMetadata())
+			chatUI(0).ChatAttachmentPreviewUploadStart(bgctx, pre.PreviewMetadata())
 			// copy the params so as not to mess with the main params above
 			previewParams := params
 
@@ -215,22 +216,22 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 				UserID:         uid,
 				Progress:       progress,
 			}
-			preview, err := u.store.UploadAsset(ctx, &task)
-			chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
+			preview, err := u.store.UploadAsset(bgctx, &task)
+			chatUI(0).ChatAttachmentPreviewUploadDone(bgctx)
 			if err == nil {
 				ures.Preview = &preview
 				ures.Preview.MimeType = pre.ContentType
 				ures.Preview.Metadata = pre.PreviewMetadata()
 				ures.Preview.Tag = chat1.AssetTag_PRIMARY
 			} else {
-				u.Debug(ctx, "upload: error uploading preview asset to s3: %s", err)
+				u.Debug(bgctx, "upload: error uploading preview asset to s3: %s", err)
 			}
 			return err
 		})
 	} else {
 		g.Go(func() error {
-			chatUI(0).ChatAttachmentPreviewUploadStart(ctx, chat1.AssetMetadata{})
-			chatUI(0).ChatAttachmentPreviewUploadDone(ctx)
+			chatUI(0).ChatAttachmentPreviewUploadStart(bgctx, chat1.AssetMetadata{})
+			chatUI(0).ChatAttachmentPreviewUploadDone(bgctx)
 			return nil
 		})
 	}
@@ -242,11 +243,11 @@ func (u *Uploader) upload(ctx context.Context, uid gregor1.UID, convID chat1.Con
 			*ures.Error = err.Error()
 		}
 		ures.Status = types.AttachmentUploaderTaskStatusSuccess
-		if err := u.setStatus(context.Background(), outboxID, ures); err != nil {
-			u.Debug(context.Background(), "failed to set status on upload success: %s", err)
+		if err := u.setStatus(bgctx, outboxID, ures); err != nil {
+			u.Debug(bgctx, "failed to set status on upload success: %s", err)
 		}
 		// Ping Deliverer to notify that some of the message in the outbox might be read to send
-		u.G().MessageDeliverer.ForceDeliverLoop(context.Background())
+		u.G().MessageDeliverer.ForceDeliverLoop(bgctx)
 		res <- ures
 	}()
 	return res, nil
